@@ -1,61 +1,51 @@
 from fastapi import FastAPI
-import json
-import os
 from datetime import datetime, timezone
+from pymongo import MongoClient
+import os
 
 app = FastAPI()
-
-FILE = "switches.json"
-
-
-def load_data():
-    if not os.path.exists(FILE):
-        return {}
-    with open(FILE, "r") as f:
-        return json.load(f)
-
-def save_data(data):
-    with open(FILE, "w") as f:
-        json.dump(data, f, indent=2)
+MONGO_URL = os.getenv("MONGO_URL")
+client = MongoClient(MONGO_URL)
+db = client["switchdb"]
+collection = db["switch"]
 
 def ensure_switch(name):
-    data = load_data()
-    if name not in data:
-        data[name] = {
+    switch = collection.find_one({"name": name})
+    if not switch:
+        collection.insert_one({
+            "name": name,
             "enabled": False,
-            "logs": {
-                "count": 0,
-                "history": []
-            }
-        }
-        save_data(data)
-    return data
+            "logs": {"count": 0, "history": []}
+        })
+    return switch
 
-@app.get("/switch/{name}/on")
+@app.get("/switch")
+def view_switches():
+    switches = {}
+    for doc in collection.find():
+        switches[doc["name"]] = {"enabled": doc["enabled"], "logs": doc["logs"]}
+    return switches
+
+@app.post("/switch/{name}/on")
 def turn_on(name: str):
-    data = ensure_switch(name)
-    data[name]["enabled"] = True
-    save_data(data)
-    return {"switch": name, "status": "ON"}
+    ensure_switch(name)
+    collection.update_one({"name": name}, {"$set": {"enabled": True}}, upsert=True)
+    return {"switch": name, "enabled": "ON"}
 
-@app.get("/switch/{name}/off")
+@app.post("/switch/{name}/off")
 def turn_off(name: str):
-    data = ensure_switch(name)
-    data[name]["enabled"] = False
-    save_data(data)
-    return {"switch": name, "status": "OFF"}
+    ensure_switch(name)
+    collection.update_one({"name": name}, {"$set": {"enabled": False}}, upsert=True)
+    return {"switch": name, "enabled": "OFF"}
 
-@app.get("/run/{name}")
+@app.post("/switch/{name}/check")
 def run_switch(name: str):
-    data = ensure_switch(name)
-    enabled = data[name]["enabled"]
-    log_entry = {
-        "time": datetime.now(timezone.utc).isoformat(),
-        "enabled": enabled
-    }
-    data[name]["logs"]["count"] += 1
-    data[name]["logs"]["history"].append(log_entry)
-    save_data(data)
-    if not enabled:
-        return {"message": f"{name} is OFF"}
-    return {"message": f"{name} ran"}
+    ensure_switch(name)
+    switch = collection.find_one({"name": name})
+    enabled = switch["enabled"]
+    log_entry = {"time": datetime.now(timezone.utc).isoformat(), "enabled": enabled}
+    collection.update_one(
+        {"name": name},
+        {"$inc": {"logs.count": 1}, "$push": {"logs.history": log_entry}}
+    )
+    return {"enabled": enabled}
